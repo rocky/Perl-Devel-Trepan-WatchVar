@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2011, 2012 Rocky Bernstein <rocky@cpan.org>
+# Copyright (C) 2012 Rocky Bernstein <rocky@cpan.org>
 use warnings; no warnings 'redefine';
 
 use rlib '../../../..';
@@ -11,14 +11,13 @@ package Devel::Trepan::CmdProcessor::Command::WatchVar;
 ## FIXME:: Make conditional
 
 use Getopt::Long qw(GetOptionsFromArray);
-use Variable::Magic;
+use Variable::Magic qw<wizard cast VMG_OP_INFO_NAME>;
 
 use if !@ISA, Devel::Trepan::CmdProcessor::Command ;
 
 unless (@ISA) {
     eval <<"EOE";
-    use constant ALIASES    => qw(disasm);
-    use constant CATEGORY   => 'data';
+    use constant CATEGORY   => 'breakpoints';
     use constant SHORT_HELP => 'WatchVar subroutine(s)';
     use constant MIN_ARGS  => 0;  # Need at least this many
     use constant MAX_ARGS  => undef;  # Need at most this many - undef -> unlimited.
@@ -29,22 +28,21 @@ EOE
 
 use strict;
 
-use vars qw(@ISA $DEFAULT_OPTIONS); 
+use vars qw(@ISA $DEFAULT_OPTIONS @WATCH_TRACKER); 
 @ISA = qw(Devel::Trepan::CmdProcessor::Command); 
+@WATCH_TRACKER = ();
 
 use vars @CMD_VARS;  # Value inherited from parent
 
 $DEFAULT_OPTIONS = { 
-    line_style => 'debug',
-    order      => '-basic',
-    tree_style => '-ascii',
+    set => 1,
 };
 
 our $NAME = set_name();
 our $HELP = <<'HELP';
 =pod
 
-B<watchvar> [I<options>] [I<variable]
+B<watchvar> [I<options>] I<variable>
 
 I<options>: 
 
@@ -80,172 +78,19 @@ sub parse_options($$)
     my $opts = $DEFAULT_OPTIONS;
     my $result = &GetOptionsFromArray(
 	$args,
-	'-concise'    => sub { $opts->{line_style} = 'concise'},
-	'-terse'      => sub { $opts->{line_style} = 'terse'},
-	'-linenoise'  => sub { $opts->{line_style} = 'linenoise'},
-	'-debug'      => sub { $opts->{line_style} = 'debug'},
-	# FIXME: would need to check that ENV vars B_CONCISE_FORMAT, B_CONCISE_TREE_FORMAT
-	# and B_CONCISE_GOTO_FORMAT are set
-	# '-env'        => sub { $opts->{line_style} = 'env'},
-	
-	'-basic'      => sub { $opts->{order} = '-basic'; },
-	'-exec'       => sub { $opts->{order} = '-exec'; },
-	'-tree'       => sub { $opts->{order} = '-tree'; },
-	
-	'-compact'    => sub { $opts->{tree_style} = '-compact'; },
-	'-loose'      => sub { $opts->{tree_style} = '-loose'; },
-	'-vt'         => sub { $opts->{tree_style} = '-vt'; },
-	'-ascii'      => sub { $opts->{tree_style} = '-ascii'; },
-	'-highlight'  => sub { $opts->{highlight} = 1; },
-	'-no-highlight' => sub { $opts->{highlight} = 0; },
-	'from=i'     => \$opts->{from},
-	'to=i'       => \$opts->{to}
+	'-get'     => sub { $opts->{get}    = 1 },
+	'-set'     => sub { $opts->{set}    = 1 },
+	'-len'     => sub { $opts->{len}    = 1 },
+	'-clear'   => sub { $opts->{clear}  = 1 },
+	'-free'    => sub { $opts->{free}   = 1 },
+	'-dup'     => sub { $opts->{dup}    = 1 },
+	'-store'   => sub { $opts->{store}  = 1 },
+	'-exists'  => sub { $opts->{exists} = 1 },
+	'-delete'  => sub { $opts->{delete} = 1 },
 	);
     $opts;
 }
 
-sub highlight_string($)
-{
-    my ($string) = shift;
-    $perl_formatter->reset();
-    $string = $perl_formatter->format_string($string);
-    chomp $string;
-    $string;
-  }
-
-sub markup_basic($$$$$) 
-{
-    my ($lines, $highlight, $proc, $from, $to) = @_;
-    my @lines = split /\n/, $lines;
-    my $current_line = 0;
-    my @newlines = ();
-    foreach (@lines) {
-	my $marker = '    ';
-	if (/^#(\s+)(\d+):(\s+)(.+)$/) {
-	    my ($space1, $lineno, $space2, $perl_code) = ($1, $2, $3, $4);
-	    $current_line = $lineno;
-	    my $marked;
-	    if ($perl_code eq '-src not supported for -e' || 
-		$perl_code eq '-src unavailable under -e') {
-		my $opts = {
-		    output => $highlight,
-		    max_continue => 5,
-		};
-		my $filename = $proc->{frame}{file};
-		$marked = DB::LineCache::getline($filename, $lineno, $opts);
-		$_ = "#${space1}${lineno}:${space2}$marked" if $marked;
-	    } else {
-		# print "FOUND line $lineno\n";
-		if ($highlight) {
-		    $marked = highlight_string($perl_code);
-		    $_ = "#${space1}${lineno}:${space2}$marked";
-		}
-	    }
-	    ## FIXME: move into DB::Breakpoint and adjust List.pm
-	    if (exists($DB::dbline{$lineno}) and 
-		my $brkpts = $DB::dbline{$lineno}) {
-		my $found = 0;
-		for my $bp (@{$brkpts}) {
-		    if (defined($bp)) {
-			$marker = sprintf('%s%02d ', $bp->icon_char, $bp->id);
-			$found = 1;
-			last;
-		    }
-		}
-	    }
-	    ## FIXME move above code
-	    
-	} elsif (/^(\s+op_flags\s+)(\d+)$/) {
-	    # Interpret flag string
-	    my $flag = $2;
-	    my $bin_flag_str = sprintf '%07b', $flag;
-	    $bin_flag_str = $perl_formatter->format_token($bin_flag_str, 'Number') if $highlight;
-	    $_ = sprintf "%s%s%s", $1, $bin_flag_str, interpret_flags($flag);
-	} elsif (/^([A-Z]+) \((0x[0-9a-f]+)\)/) {
-	    my ($op, $hex_str) = ($1, $2);
-	    # print "FOUND $op, $hex_str\n";
-	    if (defined($DB::OP_addr)) {
-		my $check_hex_str = sprintf "0x%x", $DB::OP_addr;
-		$marker = '=>  ' if ($check_hex_str eq $hex_str);
-	    }
-	    if ($highlight) {
-		$op = $perl_formatter->format_token($op, 'Subroutine');
-		$hex_str = $perl_formatter->format_token($hex_str, 'Number');
-		$_ = "$op ($hex_str)";
-	    }
-
-	}
-	$_ = $marker . $_;
-	next if $current_line < $from or $current_line > $to;
-	push @newlines, $_;
-    }
-    return join("\n", @newlines);
-}
-
-sub markup_tree($$$) 
-{
-    my ($lines, $highlight, $proc) = @_;
-    my @lines = split /\n/, $lines;
-    foreach (@lines) {
-	my $marker = '    ';
-	if (/^(\s+)\|-#(\s+)(\d+):(.+)$/) {
-	    my ($space1, $space2, $lineno, $perl_code) = ($1, $2, $3, $4);
-	    my $marked;
-	    # FIXME: DRY code with markup_basic
-	    if ($perl_code =~ 
-		/-src (?:(?:not supported for)|(?:unavailable under)) -e/) {
-		my $opts = {
-		    output => $highlight,
-		    max_continue => 5,
-		};
-		my $filename = $proc->{frame}{file};
-		$marked = DB::LineCache::getline($filename, $lineno, $opts);
-		$_ = "${space1}|-#${space2}${lineno}: $marked";
-	    } else {
-		# print "FOUND line $lineno\n";
-		if ($highlight) {
-		    $marked = highlight_string($perl_code);
-		    $_ = "${space1}|-#${space2}${lineno}: $marked";
-		}
-	    }
-	    ## END above FIXME
-	    ## FIXME: move into DB::Breakpoint and adjust List.pm
-	    if (exists($DB::dbline{$lineno}) and 
-		my $brkpts = $DB::dbline{$lineno}) {
-		my $found = 0;
-		for my $bp (@{$brkpts}) {
-		    if (defined($bp)) {
-			$marker = sprintf('%s%02d ', $bp->icon_char, $bp->id);
-			$found = 1;
-			last;
-		    }
-		}
-	    }
-	    ## FIXME move above code
-	}
-	$_ = $marker . $_;
-    }
-    return join("\n", @lines);
-}
-
-sub do_one($$$$)
-{
-    my ($proc, $title, $options, $args) = @_;
-    no strict 'refs';
-    $proc->section($title);
-    my $walker = B::Concise::compile($options->{order}, '-src', @{$args});
-    B::Concise::set_style_standard($options->{line_style});
-    B::Concise::walk_output(\my $buf);
-    $walker->();			# walks and renders into $buf;
-    my $highlight = $options->{highlight} && $proc->{settings}{highlight};
-    ## FIXME: syntax highlight the output.
-    if ('-tree' eq $options->{order}) {
-	$buf = markup_tree($buf, $options->{highlight}, $proc);
-    } elsif ('-basic' eq $options->{order}) {
-	$buf = markup_basic($buf, $options->{highlight}, $proc, $options->{from}, $options->{to});
-    }
-    $proc->msg($buf);
-}
 
 sub run($$)
 {
@@ -253,40 +98,22 @@ sub run($$)
     my @args = @$args;
     shift @args;
     my $proc = $self->{proc};
-    $DEFAULT_OPTIONS->{highlight} = $proc->{settings}{highlight};
-    $DEFAULT_OPTIONS->{from} = 0;
-    $DEFAULT_OPTIONS->{to} = 100000;
-    my $options = parse_options($self, \@args);
-    unless (scalar(@args)) {
-	if ($proc->funcname && $proc->funcname ne 'DB::DB') {
-	    push @args, $proc->funcname;
-	} else {
-	    do_one($proc, "Package Main", $options, ['-main']);
-	}
-    }
-
-    for my $disasm_unit (@args) {
-	no strict 'refs';
-	if (%{$disasm_unit.'::'}) {
-	    do_one($proc, "Package $disasm_unit", $options, 
-		   ["-stash=$disasm_unit"]);
-	} elsif ($proc->is_method($disasm_unit)) {
-	    do_one($proc, "Subroutine $disasm_unit", $options, [$disasm_unit]);
-	} elsif (-r $disasm_unit) {
-	    do_one($proc, "File $disasm_unit", $options, [$disasm_unit]);
-	} else {
-	    $proc->errmsg("Don't know $disasm_unit as a package or function");
-	}
-    }
+    my $wiz = wizard(
+	set  => sub { print "$args[0] now set to ${$_[0]}\n" },
+	free => sub { print "$args[0] destroyed\n" }
+	);
+    push @WATCH_TRACKER, $wiz;
+    my $code_to_eval = 
+	sprintf("Variable::Magic::cast %s, \$%s::WATCH_TRACKER[-1]", 
+		$args[0], __PACKAGE__);
+    my $opts = {return_type => ';'};
+    $proc->eval($code_to_eval, $opts, 4);
 }
 
   
 # Demo it
 unless (caller) {
 
-    for my $flags (0, 1, 2, 3, 0b1101, 0b100011) {
-	printf "%07b: %s\n", $flags, interpret_flags($flags);
-    }
     require Devel::Trepan::CmdProcessor;
     eval { use Devel::Callsite };
     my $proc = Devel::Trepan::CmdProcessor->new(undef, 'bogus');
@@ -305,14 +132,9 @@ unless (caller) {
                 }];
         }
     };
-    # use Enbugger 'trepan'; Enbugger->stop;
-    sub site { return callsite() };
-    $DB::OP_addr = site();
-    $cmd->run([$NAME, '-tree']);
-    print '=' x 50, "\n";
-    $cmd->run([$NAME, '-basic', '-from', __LINE__, '-to',  __LINE__ +1]);
-    print '=' x 50, "\n";
-    $cmd->run([$NAME, '-basic', '--no-highlight', '-to', 25]);
+    my $x = 1;
+    # $cmd->run([$NAME, '$x']);
+    $x = 2;
 }
 
 1;
