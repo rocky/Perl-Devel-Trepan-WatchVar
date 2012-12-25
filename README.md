@@ -1,12 +1,12 @@
-Devel::Trepan::Disassemble -- Disassemble command for Devel::Trepan
+Devel::Trepan::WatchVar -- Devel::Trepan variable watch plugin for via Variable::Magic 
 ====================================================================
-
-A modular, testable debugger in the style of the Ruby ["Trepanning"](https://github.com/rocky/rb-trepanning/wiki) [debuggers](https://github.com/rocky/rb-trepanning/wiki).
 
 SYNOPSIS
 --------
 
-Adds a "disassemble" command to [`Devel::Trepan`](https://github.com/rocky/Perl-Devel-Trepan/wiki).
+This adds a "watchvar" command to the Devel::Trepan debugger.
+This plugin uses L<Variable::Magic> to do the heavy lifting.
+See "help" inside the debugger or a list of options.
 
 INSTALLATION
 ------------
