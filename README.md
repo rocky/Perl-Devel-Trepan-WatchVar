@@ -4,8 +4,8 @@ Devel::Trepan::WatchVar -- Devel::Trepan variable watch plugin for via Variable:
 SYNOPSIS
 --------
 
-This adds a "watchvar" command to the Devel::Trepan debugger.
-This plugin uses L<Variable::Magic> to do the heavy lifting.
+This adds a `watchvar` command to the Devel::Trepan debugger.
+This plugin uses [Variable::Magic](https://metacpan.org/module/Variable::Magic) to do the heavy lifting.
 See "help" inside the debugger or a list of options.
 
 INSTALLATION
